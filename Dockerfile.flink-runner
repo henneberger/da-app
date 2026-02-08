@@ -1,0 +1,41 @@
+FROM flink:1.19.1-scala_2.12
+
+USER root
+RUN apt-get update && apt-get install -y python3 python3-pip python3-venv openjdk-17-jdk-headless \
+  && rm -rf /var/lib/apt/lists/*
+RUN ln -sf /usr/bin/python3 /usr/bin/python
+RUN ln -sf /usr/lib/jvm/java-17-openjdk-arm64/include /opt/java/openjdk/include
+RUN pip3 install --no-cache-dir apache-flink==1.19.1
+
+USER flink
+RUN mkdir /opt/flink/usrlib
+RUN curl https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.3.0-1.19/flink-sql-connector-kafka-3.3.0-1.19.jar --output /opt/flink/usrlib/flink-sql-connector-kafka-3.3.0-1.19.jar
+RUN curl https://repo1.maven.org/maven2/org/apache/flink/flink-connector-jdbc/3.3.0-1.19/flink-connector-jdbc-3.3.0-1.19.jar --output /opt/flink/usrlib/flink-connector-jdbc-3.3.0-1.19.jar
+RUN curl -fsSL https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-postgres-cdc/3.4.0/flink-sql-connector-postgres-cdc-3.4.0.jar --output /opt/flink/usrlib/flink-sql-connector-postgres-cdc-3.4.0.jar
+RUN curl https://jdbc.postgresql.org/download/postgresql-42.7.3.jar --output /opt/flink/usrlib/postgresql-42.7.3.jar
+RUN curl -fsSL https://repo1.maven.org/maven2/org/apache/flink/flink-python/1.19.1/flink-python-1.19.1.jar --output /opt/flink/lib/flink-python-1.19.1.jar
+
+RUN curl -fsSL https://repo1.maven.org/maven2/org/apache/flink/flink-s3-fs-hadoop/1.19.1/flink-s3-fs-hadoop-1.19.1.jar --output /opt/flink/lib/flink-s3-fs-hadoop-1.19.1.jar
+RUN curl -fsSL https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-common/3.3.6/hadoop-common-3.3.6.jar --output /opt/flink/lib/hadoop-common-3.3.6.jar
+RUN curl -fsSL https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-hdfs-client/3.3.6/hadoop-hdfs-client-3.3.6.jar --output /opt/flink/lib/hadoop-hdfs-client-3.3.6.jar
+RUN curl -fsSL https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-mapreduce-client-core/3.3.6/hadoop-mapreduce-client-core-3.3.6.jar --output /opt/flink/lib/hadoop-mapreduce-client-core-3.3.6.jar
+RUN curl -fsSL https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.6/hadoop-aws-3.3.6.jar --output /opt/flink/lib/hadoop-aws-3.3.6.jar
+RUN curl -fsSL https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar --output /opt/flink/lib/aws-java-sdk-bundle-1.12.262.jar
+RUN curl -fsSL https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-flink-runtime-1.19/1.10.1/iceberg-flink-runtime-1.19-1.10.1.jar --output /opt/flink/lib/iceberg-flink-runtime-1.19-1.10.1.jar
+RUN curl -fsSL https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-aws-bundle/1.10.1/iceberg-aws-bundle-1.10.1.jar --output /opt/flink/lib/iceberg-aws-bundle-1.10.1.jar
+
+RUN cat > /opt/flink/conf/core-site.xml <<'XML'
+<?xml version="1.0"?>
+<configuration>
+  <property>
+    <name>fs.s3.impl</name>
+    <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+  </property>
+  <property>
+    <name>fs.AbstractFileSystem.s3.impl</name>
+    <value>org.apache.hadoop.fs.s3a.S3A</value>
+  </property>
+</configuration>
+XML
+
+COPY target/vertx-1.0-SNAPSHOT-flink-sql-runner.jar /opt/flink/usrlib/flink-sql-runner.jar

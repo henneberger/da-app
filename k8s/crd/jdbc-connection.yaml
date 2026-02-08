@@ -1,0 +1,41 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: jdbcconnections.vertx.henneberger.dev
+spec:
+  group: vertx.henneberger.dev
+  names:
+    kind: JdbcConnection
+    plural: jdbcconnections
+    singular: jdbcconnection
+    shortNames:
+      - vxjc
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - jdbcUrl
+              properties:
+                jdbcUrl:
+                  type: string
+                driverClass:
+                  type: string
+                user:
+                  type: string
+                password:
+                  type: string
+                passwordSecretRef:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    key:
+                      type: string

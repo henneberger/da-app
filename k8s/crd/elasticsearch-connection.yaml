@@ -1,0 +1,48 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: elasticsearchconnections.vertx.henneberger.dev
+spec:
+  group: vertx.henneberger.dev
+  names:
+    kind: ElasticsearchConnection
+    plural: elasticsearchconnections
+    singular: elasticsearchconnection
+    shortNames:
+      - vxec
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - endpoint
+              properties:
+                endpoint:
+                  type: string
+                username:
+                  type: string
+                password:
+                  type: string
+                passwordSecretRef:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    key:
+                      type: string
+                apiKey:
+                  type: string
+                apiKeySecretRef:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    key:
+                      type: string

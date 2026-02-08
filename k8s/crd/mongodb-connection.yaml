@@ -1,0 +1,54 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: mongoconnections.vertx.henneberger.dev
+spec:
+  group: vertx.henneberger.dev
+  names:
+    kind: MongoConnection
+    plural: mongoconnections
+    singular: mongoconnection
+    shortNames:
+      - vxmc
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - host
+                - database
+              properties:
+                host:
+                  type: string
+                port:
+                  type: integer
+                  default: 27017
+                database:
+                  type: string
+                user:
+                  type: string
+                password:
+                  type: string
+                passwordSecretRef:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    key:
+                      type: string
+                authSource:
+                  type: string
+                ssl:
+                  type: boolean
+                  default: false
+                options:
+                  type: object
+                  additionalProperties:
+                    type: string

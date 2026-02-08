@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vertx-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vertx-operator
+  template:
+    metadata:
+      labels:
+        app: vertx-operator
+    spec:
+      serviceAccountName: vertx-operator
+      containers:
+        - name: operator
+          image: vertx-graphql:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: VERTX_MODE
+              value: operator
+            - name: DEFAULT_SERVICE_ACCOUNT
+              value: "flink-job"
+            - name: MAX_CPU_MILLICORES
+              value: "4000"
+            - name: MAX_MEMORY_MIB
+              value: "8192"
+            - name: DEFAULT_CHECKPOINT_DIR
+              value: "file:///tmp/flink-checkpoints"
+            - name: DEFAULT_SAVEPOINT_DIR
+              value: "file:///tmp/flink-savepoints"

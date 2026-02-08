@@ -1,0 +1,199 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: queries.vertx.henneberger.dev
+spec:
+  group: vertx.henneberger.dev
+  names:
+    kind: Query
+    plural: queries
+    singular: query
+    shortNames:
+      - vxq
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - connectionRef
+                - schemaRefs
+                - typeName
+              properties:
+                connectionRef:
+                  type: string
+                schemaRefs:
+                  type: array
+                  items:
+                    type: string
+                typeName:
+                  type: string
+                fieldName:
+                  type: string
+                sql:
+                  type: string
+                engine:
+                  type: string
+                  enum:
+                    - POSTGRES
+                    - DUCKDB
+                    - JDBC
+                    - MONGODB
+                    - ELASTICSEARCH
+                    - DYNAMODB
+                resultMode:
+                  type: string
+                  enum:
+                    - LIST
+                    - SINGLE
+                description:
+                  type: string
+                timeoutMs:
+                  type: integer
+                  minimum: 1
+                requiredRoles:
+                  type: array
+                  items:
+                    type: string
+                requiredScopes:
+                  type: array
+                  items:
+                    type: string
+                params:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - index
+                      - source
+                    properties:
+                      index:
+                        type: integer
+                        minimum: 1
+                      source:
+                        type: object
+                        required:
+                          - kind
+                          - name
+                        properties:
+                          kind:
+                            type: string
+                            description: "Where to read the parameter from. For ARG/JWT/CURSOR, name may be a JSONPath (starts with $). ARG also accepts dotted paths like input.mydata. RAW returns the full arguments map (JSON-serialized when bound to SQL engines)."
+                            enum:
+                              - ARG
+                              - HEADER
+                              - ENV
+                              - PARENT
+                              - JWT
+                              - CURSOR
+                              - RAW
+                              - PYTHON
+                          name:
+                            type: string
+                            description: "Key or path for the selected kind. For ARG, a top-level argument name, dotted path (input.mydata), or JSONPath ($.input.mydata). For JWT/CURSOR, a claim/payload key or JSONPath. For HEADER/ENV/PARENT, the exact key name. For RAW, the name is ignored."
+                          python:
+                            type: object
+                            description: "Only used when kind=PYTHON. Invokes a PythonFunction custom resource and returns its result (JSON-deserialized)."
+                            properties:
+                              functionRef:
+                                type: string
+                                description: "Name of the PythonFunction resource to invoke. If omitted, defaults to source.name."
+                              timeoutMs:
+                                type: integer
+                                minimum: 1
+                              args:
+                                type: array
+                                description: "Arguments passed positionally to the Python function. Each item is another ParamSource object."
+                                items:
+                                  x-kubernetes-preserve-unknown-fields: true
+                pagination:
+                  type: object
+                  properties:
+                    mode:
+                      type: string
+                      enum:
+                        - CURSOR
+                    firstArg:
+                      type: string
+                    afterArg:
+                      type: string
+                    maxPageSize:
+                      type: integer
+                    fetchExtra:
+                      type: boolean
+                    cursorFields:
+                      type: array
+                      items:
+                        type: string
+                    edgesFieldName:
+                      type: string
+                    nodeFieldName:
+                      type: string
+                    cursorFieldName:
+                      type: string
+                    pageInfoFieldName:
+                      type: string
+                    endCursorFieldName:
+                      type: string
+                    hasNextPageFieldName:
+                      type: string
+                    signing:
+                      type: object
+                      properties:
+                        method:
+                          type: string
+                          enum:
+                            - HMAC
+                            - JWT
+                        sharedSecret:
+                          type: string
+                        sharedSecretEnv:
+                          type: string
+                        useAuthJwtSecret:
+                          type: boolean
+                mongo:
+                  type: object
+                  properties:
+                    collection:
+                      type: string
+                    pipeline:
+                      type: string
+                elasticsearch:
+                  type: object
+                  properties:
+                    index:
+                      type: string
+                    query:
+                      type: string
+                dynamodb:
+                  type: object
+                  properties:
+                    table:
+                      type: string
+                    keyConditionExpression:
+                      type: string
+                    expressionAttributeNames:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    expressionAttributeValues:
+                      type: object
+                      additionalProperties:
+                        x-kubernetes-preserve-unknown-fields: true
+                    indexName:
+                      type: string
+                    limit:
+                      type: integer
+            status:
+              type: object
+              properties:
+                status:
+                  type: string

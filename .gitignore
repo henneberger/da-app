@@ -1,0 +1,68 @@
+# Java / Maven
+target/
+dependency-reduced-pom.xml
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+hs_err_pid*
+replay_pid*
+
+# Logs
+*.log
+logs/
+
+# Node / JS (for docs/tools subprojects)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.yarn/
+.pnp.*
+
+# Common JS build outputs
+dist/
+build/
+.next/
+.nuxt/
+.svelte-kit/
+coverage/
+.turbo/
+.vite/
+
+# IDEs
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.vscode/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Env/secrets (keep actual secret files out of git)
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+
+# Temporary files
+*.swp
+*.swo
+*~
+.tmp/
+tmp/
+
+# Kubernetes/Helm local scratch (keep manifests in repo)
+*.local.yaml
+*.local.yml

@@ -1,0 +1,194 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: graphqlschemas.vertx.henneberger.dev
+spec:
+  group: vertx.henneberger.dev
+  names:
+    kind: GraphQLSchema
+    plural: graphqlschemas
+    singular: graphqlschema
+    shortNames:
+      - vxgs
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - schema
+              properties:
+                schema:
+                  type: string
+                replicas:
+                  type: integer
+                  default: 1
+                servicePort:
+                  type: integer
+                  default: 8080
+                image:
+                  type: string
+                auth:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                      enum:
+                        - NONE
+                        - JWT
+                        - BASIC
+                    required:
+                      type: boolean
+                      default: true
+                    tokenHeader:
+                      type: string
+                    tokenCookie:
+                      type: string
+                    tokenQueryParam:
+                      type: string
+                    jwt:
+                      type: object
+                      properties:
+                        jwksUrl:
+                          type: string
+                        issuer:
+                          type: string
+                        audiences:
+                          type: array
+                          items:
+                            type: string
+                        sharedSecret:
+                          type: string
+                        sharedSecretEnv:
+                          type: string
+                        jwksCacheSeconds:
+                          type: integer
+                        clockSkewSeconds:
+                          type: integer
+                    basicUsers:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - username
+                          - password
+                        properties:
+                          username:
+                            type: string
+                          password:
+                            type: string
+                          roles:
+                            type: array
+                            items:
+                              type: string
+                observability:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                    metrics:
+                      type: object
+                      properties:
+                        enabled:
+                          type: boolean
+                        backend:
+                          type: string
+                          enum:
+                            - PROMETHEUS
+                            - OTLP
+                        endpoint:
+                          type: string
+                        jvm:
+                          type: boolean
+                        httpServer:
+                          type: boolean
+                        httpClient:
+                          type: boolean
+                        labels:
+                          type: object
+                          additionalProperties:
+                            type: string
+                        otlp:
+                          type: object
+                          properties:
+                            endpoint:
+                              type: string
+                            headers:
+                              type: object
+                              additionalProperties:
+                                type: string
+                            stepSeconds:
+                              type: integer
+                    tracing:
+                      type: object
+                      properties:
+                        enabled:
+                          type: boolean
+                        exporter:
+                          type: string
+                          enum:
+                            - OTLP
+                            - ZIPKIN
+                            - JAEGER
+                        serviceName:
+                          type: string
+                        otlp:
+                          type: object
+                          properties:
+                            endpoint:
+                              type: string
+                            protocol:
+                              type: string
+                              enum:
+                                - GRPC
+                                - HTTP_PROTOBUF
+                            headers:
+                              type: object
+                              additionalProperties:
+                                type: string
+                        sampling:
+                          type: object
+                          properties:
+                            type:
+                              type: string
+                              enum:
+                                - ALWAYS_ON
+                                - ALWAYS_OFF
+                                - RATIO
+                            value:
+                              type: number
+                    health:
+                      type: object
+                      properties:
+                        enabled:
+                          type: boolean
+                        endpoint:
+                          type: string
+                        checks:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              name:
+                                type: string
+                              type:
+                                type: string
+                                enum:
+                                  - JDBC
+                                  - DUCKDB
+                                  - KAFKA
+                              connectionRef:
+                                type: string
+            status:
+              type: object
+              properties:
+                status:
+                  type: string

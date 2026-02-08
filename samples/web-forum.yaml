@@ -1,0 +1,1975 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: forum-db
+type: Opaque
+stringData:
+  password: app
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: forum-postgres-init
+data:
+  00-init.sql: |
+    create extension if not exists vector;
+    create extension if not exists pgcrypto;
+
+    create table if not exists users (
+      id text primary key,
+      username text not null,
+      avatarurl text,
+      createdat timestamptz not null default now(),
+      karma int not null default 0,
+      bio text
+    );
+
+    create table if not exists flairs (
+      id text primary key,
+      text text not null,
+      color text
+    );
+
+    create table if not exists posts (
+      id text primary key,
+      authorid text not null,
+      title text not null,
+      body text not null,
+      embedding vector(384),
+      url text,
+      urlsummary text,
+      mediaurl text,
+      thumbnailurl text,
+      createdat timestamptz not null,
+      editedat timestamptz,
+      deletedat timestamptz,
+      commentcount bigint not null default 0,
+      nsfw boolean not null default false,
+      spoiler boolean not null default false,
+      locked boolean not null default false,
+      pinned boolean not null default false,
+      flairid text
+    );
+    alter table posts add column if not exists embedding vector(384);
+    alter table posts add column if not exists urlsummary text;
+    create index if not exists posts_embedding_idx
+      on posts using ivfflat (embedding vector_l2_ops)
+      with (lists = 50)
+      where embedding is not null;
+
+    create table if not exists comments (
+      id text primary key,
+      postid text not null,
+      parentcommentid text,
+      authorid text not null,
+      body text not null,
+      createdat timestamptz not null,
+      editedat timestamptz,
+      deletedat timestamptz,
+      score int not null default 0
+    );
+    alter table comments replica identity full;
+
+    create table if not exists comment_votes (
+      commentid text not null,
+      userid text not null,
+      delta int not null,
+      createdat timestamptz not null default now(),
+      primary key (commentid, userid)
+    );
+    alter table comment_votes replica identity full;
+
+    create table if not exists post_votes (
+      postid text not null,
+      userid text not null,
+      delta int not null,
+      createdat timestamptz not null default now(),
+      primary key (postid, userid)
+    );
+    alter table post_votes replica identity full;
+
+    create table if not exists postscores (
+      postid text primary key,
+      upvotes bigint not null,
+      score double precision not null,
+      lastupdated timestamptz not null
+    );
+
+    create table if not exists comment_counts (
+      postid text primary key,
+      comment_count bigint not null,
+      updatedat timestamptz not null
+    );
+
+    create table if not exists post_saves (
+      postid text not null,
+      userid text not null,
+      createdat timestamptz not null default now(),
+      primary key (postid, userid)
+    );
+
+    create table if not exists comment_saves (
+      commentid text not null,
+      userid text not null,
+      createdat timestamptz not null default now(),
+      primary key (commentid, userid)
+    );
+
+    create table if not exists reports (
+      id text primary key,
+      targetid text not null,
+      targettype text not null,
+      reason text not null,
+      createdat timestamptz not null default now(),
+      reporterid text not null
+    );
+
+    create table if not exists modlog (
+      id text primary key,
+      action text not null,
+      targetpostid text not null,
+      actorid text not null,
+      reason text,
+      createdat timestamptz not null default now()
+    );
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+spec:
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  selector:
+    app: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg16
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-c"
+            - "wal_level=logical"
+            - "-c"
+            - "max_wal_senders=10"
+            - "-c"
+            - "max_replication_slots=10"
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: forum
+            - name: POSTGRES_USER
+              value: app
+            - name: POSTGRES_PASSWORD
+              value: app
+          volumeMounts:
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d/00-init.sql
+              subPath: 00-init.sql
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U app -d forum"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: init
+          configMap:
+            name: forum-postgres-init
+        - name: data
+          emptyDir: {}
+---
+apiVersion: dev.henneberger/v1alpha1
+kind: FlinkCatalog
+metadata:
+  name: forum-flink-catalog
+spec:
+  sql: |
+
+    create table posts_cdc (
+      id string,
+      authorid string,
+      title string,
+      body string,
+      url string,
+      urlsummary string,
+      mediaurl string,
+      thumbnailurl string,
+      createdat timestamp(3),
+      editedat timestamp(3),
+      deletedat timestamp(3),
+      nsfw boolean,
+      spoiler boolean,
+      locked boolean,
+      pinned boolean,
+      flairid string,
+      primary key (id) not enforced
+    ) with (
+      'connector' = 'postgres-cdc',
+      'decoding.plugin.name' = 'pgoutput',
+      'debezium.publication.name' = 'forum_posts_pub',
+      'debezium.publication.autocreate.mode' = 'filtered',
+      'hostname' = 'postgres.default.svc',
+      'port' = '5432',
+      'slot.name' = 'forum_posts',
+      'username' = 'app',
+      'password' = 'app',
+      'database-name' = 'forum',
+      'schema-name' = 'public',
+      'table-name' = 'posts'
+    );
+
+    create table comments_cdc (
+      id string,
+      postid string,
+      parentcommentid string,
+      authorid string,
+      body string,
+      createdat timestamp(3),
+      createdat_ltz as cast(createdat as timestamp_ltz(3)),
+      editedat timestamp(3),
+      deletedat timestamp(3),
+      score int,
+      primary key (id) not enforced,
+      watermark for createdat_ltz as createdat_ltz - interval '5' second
+    ) with (
+      'connector' = 'postgres-cdc',
+      'decoding.plugin.name' = 'pgoutput',
+      'debezium.publication.name' = 'forum_comments_pub',
+      'debezium.publication.autocreate.mode' = 'filtered',
+      'hostname' = 'postgres.default.svc',
+      'port' = '5432',
+      'slot.name' = 'forum_comments',
+      'username' = 'app',
+      'password' = 'app',
+      'database-name' = 'forum',
+      'schema-name' = 'public',
+      'table-name' = 'comments'
+    );
+
+    create table post_votes_cdc (
+      postid string,
+      userid string,
+      delta int,
+      createdat timestamp(3),
+      createdat_ltz as cast(createdat as timestamp_ltz(3)),
+      primary key (postid, userid) not enforced,
+      watermark for createdat_ltz as createdat_ltz - interval '5' second
+    ) with (
+      'connector' = 'postgres-cdc',
+      'decoding.plugin.name' = 'pgoutput',
+      'debezium.publication.name' = 'forum_post_votes_pub',
+      'debezium.publication.autocreate.mode' = 'filtered',
+      'hostname' = 'postgres.default.svc',
+      'port' = '5432',
+      'slot.name' = 'forum_post_votes',
+      'username' = 'app',
+      'password' = 'app',
+      'database-name' = 'forum',
+      'schema-name' = 'public',
+      'table-name' = 'post_votes'
+    );
+
+    create table modlog_cdc (
+      id string,
+      action string,
+      targetpostid string,
+      actorid string,
+      reason string,
+      createdat timestamp(3),
+      primary key (id) not enforced
+    ) with (
+      'connector' = 'postgres-cdc',
+      'decoding.plugin.name' = 'pgoutput',
+      'debezium.publication.name' = 'forum_modlog_pub',
+      'debezium.publication.autocreate.mode' = 'filtered',
+      'hostname' = 'postgres.default.svc',
+      'port' = '5432',
+      'slot.name' = 'forum_modlog',
+      'username' = 'app',
+      'password' = 'app',
+      'database-name' = 'forum',
+      'schema-name' = 'public',
+      'table-name' = 'modlog'
+    );
+
+    create table postScoresSink (
+      postid string,
+      upvotes bigint,
+      score double,
+      lastupdated timestamp(3),
+      primary key (postid) not enforced
+    ) with (
+      'connector' = 'jdbc',
+      'url' = 'jdbc:postgresql://postgres.default.svc:5432/forum',
+      'table-name' = 'postscores',
+      'username' = 'app',
+      'password' = 'app',
+      'sink.buffer-flush.max-rows' = '1',
+      'sink.buffer-flush.interval' = '1s'
+    );
+
+    create table commentCountsSink (
+      postid string,
+      comment_count bigint,
+      updatedat timestamp(3),
+      primary key (postid) not enforced
+    ) with (
+      'connector' = 'jdbc',
+      'url' = 'jdbc:postgresql://postgres.default.svc:5432/forum',
+      'table-name' = 'comment_counts',
+      'username' = 'app',
+      'password' = 'app',
+      'sink.buffer-flush.max-rows' = '1',
+      'sink.buffer-flush.interval' = '1s'
+    );
+
+    create table modlogMaterializedSink (
+      id string,
+      action string,
+      targetpostid string,
+      actorid string,
+      reason string,
+      createdat timestamp(3),
+      primary key (id) not enforced
+    ) with (
+      'connector' = 'jdbc',
+      'url' = 'jdbc:postgresql://postgres.default.svc:5432/forum',
+      'table-name' = 'modlog_materialized',
+      'username' = 'app',
+      'password' = 'app',
+      'sink.buffer-flush.max-rows' = '1',
+      'sink.buffer-flush.interval' = '1s'
+    );
+
+    create table userFlagsSink (
+      userid string,
+      reason string,
+      score bigint,
+      windowstart timestamp(3),
+      windowend timestamp(3),
+      createdat timestamp(3),
+      primary key (userid, reason, windowstart) not enforced
+    ) with (
+      'connector' = 'jdbc',
+      'url' = 'jdbc:postgresql://postgres.default.svc:5432/forum',
+      'table-name' = 'user_flags',
+      'username' = 'app',
+      'password' = 'app',
+      'sink.buffer-flush.max-rows' = '1',
+      'sink.buffer-flush.interval' = '1s'
+    );
+---
+apiVersion: dev.henneberger/v1alpha1
+kind: FlinkSqlJob
+metadata:
+  name: forum-materialize
+spec:
+  image: flink-sql-runner:local
+  serviceAccount: flink-job
+  catalogRefs: [forum-flink-catalog]
+  sql: |
+    EXECUTE STATEMENT SET
+    BEGIN
+      insert into postScoresSink
+      select postid,
+             cast(sum(case when delta > 0 then 1 else 0 end) as bigint) as upvotes,
+             cast(sum(delta) as double) as score,
+             current_timestamp
+      from post_votes_cdc
+      group by postid;
+
+      insert into commentCountsSink
+      select postid,
+             cast(count(*) as bigint) as comment_count,
+             current_timestamp
+      from comments_cdc
+      where deletedat is null
+      group by postid;
+
+      insert into modlogMaterializedSink
+      select id,
+             action,
+             targetpostid,
+             actorid,
+             reason,
+             createdat
+      from modlog_cdc;
+    
+      insert into userFlagsSink
+      select userid,
+             'vote_burst' as reason,
+             cast(count(*) as bigint) as score,
+             window_start,
+             window_end,
+             current_timestamp
+      from table(
+        tumble(table post_votes_cdc, descriptor(createdat_ltz), interval '1' minute)
+      )
+      group by userid, window_start, window_end
+      having count(*) >= 20;
+    
+      insert into userFlagsSink
+      select authorid as userid,
+             'comment_burst' as reason,
+             cast(count(*) as bigint) as score,
+             window_start,
+             window_end,
+             current_timestamp
+      from table(
+        tumble(table comments_cdc, descriptor(createdat_ltz), interval '5' minute)
+      )
+      group by authorid, window_start, window_end
+      having count(*) >= 10;
+    END;
+
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: GraphQLSchema
+metadata:
+  name: forum
+spec:
+  schema: |
+    type Query {
+      post(id: ID!): Post
+      recentPosts(limit: Int = 20, offset: Int = 0): [Post!]!
+      hotPosts(limit: Int = 20, offset: Int = 0): [Post!]!
+      searchPosts(term: String!, limit: Int = 20, offset: Int = 0): [Post!]!
+      vectorSearchPosts(q: String!, limit: Int = 10): [Post!]!
+      modLog(limit: Int = 50, offset: Int = 0): [ModLog!]!
+      user(id: ID!): User
+      me: User
+    }
+
+    type Mutation {
+      createPost(
+        title: String!
+        body: String!
+        url: String
+        mediaUrl: String
+        flairId: ID
+        nsfw: Boolean = false
+        spoiler: Boolean = false
+      ): CreatePostPayload
+      createComment(
+        postId: ID!
+        parentCommentId: ID
+        body: String!
+      ): CreateCommentPayload
+      votePost(postId: ID!, delta: Int!): VotePostPayload
+      upvotePost(postId: ID!, delta: Int!): VotePostPayload
+
+      editPost(
+        id: ID!
+        title: String
+        body: String
+        url: String
+        mediaUrl: String
+        flairId: ID
+        nsfw: Boolean
+        spoiler: Boolean
+      ): EditPostPayload
+      deletePost(id: ID!): DeletePostPayload
+      lockPost(id: ID!): LockPostPayload
+      pinPost(id: ID!): PinPostPayload
+
+      editComment(id: ID!, body: String!): EditCommentPayload
+      deleteComment(id: ID!): DeleteCommentPayload
+      voteComment(commentId: ID!, delta: Int!): VoteCommentPayload
+
+      report(targetId: ID!, targetType: ReportTarget!, reason: String!): Report
+      softDeletePost(postId: ID!): SoftDeletePostPayload
+      adminSoftDeletePost(postId: ID!, reason: String, logId: ID!): AdminSoftDeletePostPayload
+    }
+    type Subscription {
+      commentUpdates(id: ID!): Comment!
+    }
+    
+    type User {
+      id: ID!
+      username: String!
+      avatarUrl: String
+      createdAt: String!
+      karma: Int!
+      bio: String
+    }
+
+    type Flair {
+      id: ID!
+      text: String!
+      color: String
+    }
+
+    type Post {
+      id: ID!
+      authorId: ID!
+      title: String!
+      body: String!
+      url: String
+      urlSummary: String
+      mediaUrl: String
+      thumbnailUrl: String
+      createdAt: String!
+      editedAt: String
+      deletedAt: String
+      upvotes: Int!
+      score: Float!
+      commentCount: Int!
+      nsfw: Boolean!
+      spoiler: Boolean!
+      locked: Boolean!
+      pinned: Boolean!
+      flair: Flair
+      comments(sort: CommentSort = BEST): [Comment!]!
+      distance: Float
+    }
+
+    type Comment {
+      id: ID!
+      postId: ID!
+      parentCommentId: ID
+      authorId: ID!
+      body: String!
+      createdAt: String!
+      editedAt: String
+      deletedAt: String
+      score: Int!
+      replies(sort: CommentSort = BEST): [Comment!]!
+    }
+
+    type PostScore { postId: ID!, upvotes: Int!, score: Float! }
+
+    type ModLog {
+      id: ID!
+      action: String!
+      targetPostId: ID!
+      actorId: ID!
+      reason: String
+      createdAt: String!
+    }
+
+    type Report {
+      id: ID!
+      targetId: ID!
+      targetType: ReportTarget!
+      reason: String!
+      createdAt: String!
+      reporterId: ID!
+    }
+
+    type CreatePostPayload {
+      authorId: ID!
+      title: String!
+      body: String!
+      url: String
+      urlSummary: String
+      mediaUrl: String
+      flairId: ID
+      nsfw: Boolean
+      spoiler: Boolean
+      traceId: String
+      requestTime: String
+    }
+
+    type EditPostPayload {
+      id: ID!
+      title: String
+      body: String
+      url: String
+      urlSummary: String
+      mediaUrl: String
+      flairId: ID
+      nsfw: Boolean
+      spoiler: Boolean
+      editedAt: String
+    }
+
+    type DeletePostPayload {
+      id: ID!
+      deletedAt: String
+    }
+
+    type LockPostPayload {
+      id: ID!
+      locked: Boolean!
+    }
+
+    type PinPostPayload {
+      id: ID!
+      pinned: Boolean!
+    }
+
+    type SoftDeletePostPayload {
+      postId: ID!
+      deletedAt: String!
+      traceId: String
+      requestTime: String
+    }
+
+    type AdminSoftDeletePostPayload {
+      postId: ID!
+      deletedAt: String!
+      reason: String
+      logId: ID!
+      actorId: ID
+      traceId: String
+      requestTime: String
+    }
+
+    type CreateCommentPayload {
+      id: ID!
+      postId: ID!
+      parentCommentId: ID
+      authorId: ID!
+      body: String!
+      traceId: String
+      requestTime: String
+    }
+
+    type EditCommentPayload {
+      id: ID!
+      body: String!
+      editedAt: String
+    }
+
+    type DeleteCommentPayload {
+      id: ID!
+      deletedAt: String
+    }
+
+    type VotePostPayload {
+      postId: ID!
+      voterId: ID!
+      delta: Int!
+      traceId: String
+      requestTime: String
+    }
+
+    type VoteCommentPayload {
+      commentId: ID!
+      voterId: ID!
+      delta: Int!
+      traceId: String
+      requestTime: String
+    }
+
+    enum ReportTarget { POST COMMENT USER }
+    enum CommentSort { BEST NEW OLD TOP }
+  auth:
+    type: JWT
+    required: false
+    tokenHeader: Authorization
+    jwt:
+      sharedSecret: dev-secret-32-bytes-minimum-OK!!
+      clockSkewSeconds: 30
+    # Prototype OAuth clients (client_credentials) are configured as BASIC users.
+    # client_id = username, client_secret = password.
+    basicUsers:
+      - username: forum-mcp-client
+        password: forum-mcp-secret
+        roles: ["mcp_client"]
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: GraphQLOperation
+metadata:
+  name: latest-posts
+spec:
+  schemaRefs: ["forum"]
+  description: Read the latest 10 posts.
+  document: |
+    query latest_posts {
+      recentPosts(limit: 10, offset: 0) {
+        id
+        title
+        url
+        urlSummary
+        authorId
+        createdAt
+        score
+        commentCount
+      }
+    }
+  operationName: latest_posts
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: GraphQLOperation
+metadata:
+  name: search-posts
+spec:
+  schemaRefs: ["forum"]
+  description: Search posts by term (returns up to 10).
+  document: |
+    query search_posts($term: String!) {
+      searchPosts(term: $term, limit: 10, offset: 0) {
+        id
+        title
+        authorId
+        createdAt
+        score
+        commentCount
+      }
+    }
+  operationName: search_posts
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: GraphQLOperation
+metadata:
+  name: vector-search-posts
+spec:
+  schemaRefs: ["forum"]
+  description: Vector (semantic) search over posts (returns up to 10).
+  document: |
+    query vector_search_posts($q: String!, $limit: Int!) {
+      vectorSearchPosts(q: $q, limit: $limit) {
+        id
+        title
+        authorId
+        createdAt
+        score
+        commentCount
+        distance
+      }
+    }
+  operationName: vector_search_posts
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: GraphQLOperation
+metadata:
+  name: create-post
+spec:
+  schemaRefs: ["forum"]
+  description: Create a new post.
+  document: |
+    mutation create_post(
+      $title: String!
+      $body: String!
+      $url: String
+      $mediaUrl: String
+      $flairId: ID
+      $nsfw: Boolean
+      $spoiler: Boolean
+    ) {
+      createPost(
+        title: $title
+        body: $body
+        url: $url
+        mediaUrl: $mediaUrl
+        flairId: $flairId
+        nsfw: $nsfw
+        spoiler: $spoiler
+      ) {
+        authorId
+        title
+        body
+        url
+        urlSummary
+        mediaUrl
+        flairId
+        nsfw
+        spoiler
+        traceId
+        requestTime
+      }
+    }
+  operationName: create_post
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: McpServer
+metadata:
+  name: forum-mcp
+spec:
+  schemaRefs: ["forum"]
+  # Streamable HTTP MCP endpoint (JSON-RPC over POST). Defaults to /mcp.
+  path: /mcp
+  # Only expose the tool-friendly operations above.
+  operationRefs:
+    - latest-posts
+    - search-posts
+    - vector-search-posts
+    - create-post
+  # Prefer operationName-based tool names (e.g. latest_posts, search_posts, create_post).
+  toolNameStrategy: OPERATION_NAME
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: Connection
+metadata:
+  name: forum-db
+spec:
+  host: postgres.default.svc
+  port: 5432
+  database: forum
+  user: app
+  passwordSecretRef:
+    name: forum-db
+    key: password
+  ssl: false
+  pool:
+    maxSize: 20
+    maxWaitQueueSize: 500
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PythonFunction
+metadata:
+  name: embed384
+spec:
+  schemaRefs: ["forum"]
+  # The first call downloads the embedding model; allow extra time for cold start.
+  timeoutMs: 180000
+  requirements:
+    inline: |
+      # Keep this compatible with the runtime's Python (currently 3.12 in the container).
+      fastembed==0.7.4
+  function:
+    name: embed
+    module:
+      inline: |
+        from fastembed import TextEmbedding
+        _MODEL = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+        def embed(text: str):
+          t = "" if text is None else str(text)
+          vec = next(_MODEL.embed([t]))
+          return [float(x) for x in vec]
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PythonFunction
+metadata:
+  name: summarize
+spec:
+  schemaRefs: ["forum"]
+  timeoutMs: 45000
+  requirements:
+    inline: |
+      beautifulsoup4==4.12.3
+  function:
+    name: summarize_url_key_points
+    module:
+      inline: |
+        import json
+        import os
+        import re
+        import subprocess
+        import urllib.request
+        from bs4 import BeautifulSoup
+
+        _WS_RE = re.compile(r"\s+")
+
+        def _clean_text(text: str) -> str:
+          if not text:
+            return ""
+          # Normalize whitespace and keep size bounded for the LLM call.
+          t = _WS_RE.sub(" ", text).strip()
+          if len(t) > 60_000:
+            t = t[:60_000]
+          return t
+
+        def _html_to_text(html: str) -> str:
+          soup = BeautifulSoup(html, "html.parser")
+          for tag in soup(["script", "style", "noscript", "svg"]):
+            tag.decompose()
+          return soup.get_text(" ", strip=True)
+
+        def _curl_fetch(url: str) -> str:
+          # Use curl as requested; follow redirects and set a user-agent for basic compatibility.
+          cmd = [
+            "curl",
+            "-LsS",
+            "--max-time", "15",
+            "--connect-timeout", "5",
+            "--retry", "2",
+            "--retry-delay", "1",
+            # Ask curl to negotiate/handle content-encoding (gzip/br/zstd depending on build).
+            "--compressed",
+            # Chrome-like headers (best-effort; exact sets vary by Chrome version and platform).
+            "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "-H", "Accept-Language: en-US,en;q=0.9",
+            "-H", "Cache-Control: no-cache",
+            "-H", "Pragma: no-cache",
+            "-H", "Upgrade-Insecure-Requests: 1",
+            "-H", "Sec-Fetch-Dest: document",
+            "-H", "Sec-Fetch-Mode: navigate",
+            "-H", "Sec-Fetch-Site: none",
+            "-H", "Sec-Fetch-User: ?1",
+            "-H", "sec-ch-ua: \"Chromium\";v=\"122\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"122\"",
+            "-H", "sec-ch-ua-mobile: ?0",
+            "-H", "sec-ch-ua-platform: \"macOS\"",
+            "-H", "DNT: 1",
+            "-H", "Sec-GPC: 1",
+            url,
+          ]
+          out = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+          # Best-effort decode; if it's binary-ish this will degrade gracefully.
+          return out.decode("utf-8", errors="replace")
+
+        def _fallback_summary(text: str) -> str:
+          t = _clean_text(text)
+          if not t:
+            return None
+          # Very simple fallback: first ~5 sentences as "key points".
+          parts = re.split(r"(?<=[.!?])\s+", t)
+          bullets = [p.strip() for p in parts if p.strip()][:5]
+          if not bullets:
+            return None
+          return "\n".join(["- " + b for b in bullets])[:1200]
+
+        def _openai_summary(text: str) -> str:
+          api_key = "my-open-api-key"
+          if not api_key:
+            return None
+          base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com").rstrip("/")
+          model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+          payload = {
+            "model": model,
+            "messages": [
+              {
+                "role": "system",
+                "content": "You summarize web pages. Return only key points as 5-8 concise bullets. No preamble.",
+              },
+              {
+                "role": "user",
+                "content": text,
+              },
+            ],
+            "temperature": 0.2,
+          }
+
+          req = urllib.request.Request(
+            base + "/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+              "Content-Type": "application/json",
+              "Authorization": "Bearer " + api_key,
+            },
+            method="POST",
+          )
+          with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+          # Compatible with the common OpenAI chat response shape.
+          return (
+            data.get("choices", [{}])[0]
+              .get("message", {})
+              .get("content")
+          )
+
+        def summarize_url_key_points(url: str):
+          if url is None:
+            return None
+          u = str(url).strip()
+          if not u:
+            return None
+          if not (u.startswith("http://") or u.startswith("https://")):
+            return None
+
+          try:
+            raw = _curl_fetch(u)
+          except Exception:
+            return None
+
+          text = raw
+          if "<html" in raw.lower() or "<body" in raw.lower():
+            try:
+              text = _html_to_text(raw)
+            except Exception:
+              text = raw
+
+          cleaned = _clean_text(text)
+          if not cleaned:
+            return None
+
+          ai = _openai_summary(cleaned)
+          if ai:
+            return ai.strip()[:2000]
+          return _fallback_summary(cleaned)
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: Query
+metadata:
+  name: post
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  typeName: Query
+  fieldName: post
+  resultMode: SINGLE
+  sql: |
+    select p.id,
+           p.authorid as "authorId",
+           p.title,
+           p.body,
+           p.url,
+           p.urlsummary as "urlSummary",
+           p.mediaurl as "mediaUrl",
+           p.thumbnailurl as "thumbnailUrl",
+           p.createdat as "createdAt",
+           p.editedat as "editedAt",
+           p.deletedat as "deletedAt",
+           coalesce(s.upvotes, 0) as "upvotes",
+           coalesce(s.score, 0) as "score",
+           coalesce(cc.comment_count, 0) as "commentCount",
+           p.nsfw,
+           p.spoiler,
+           p.locked,
+           p.pinned,
+           p.flairid as "flairId"
+    from posts p
+    left join postscores s on s.postid = p.id
+    left join comment_counts cc on cc.postid = p.id
+    where p.id = $1
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name: id
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: Query
+metadata:
+  name: recent-posts
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  typeName: Query
+  fieldName: recentPosts
+  sql: |
+    select p.id,
+           p.authorid as "authorId",
+           p.title,
+           p.body,
+           p.url,
+           p.urlsummary as "urlSummary",
+           p.mediaurl as "mediaUrl",
+           p.thumbnailurl as "thumbnailUrl",
+           p.createdat as "createdAt",
+           p.editedat as "editedAt",
+           p.deletedat as "deletedAt",
+           coalesce(s.upvotes, 0) as "upvotes",
+           coalesce(s.score, 0) as "score",
+           coalesce(cc.comment_count, 0) as "commentCount",
+           p.nsfw,
+           p.spoiler,
+           p.locked,
+           p.pinned,
+           p.flairid as "flairId"
+    from posts p
+    left join postscores s on s.postid = p.id
+    left join comment_counts cc on cc.postid = p.id
+    where p.deletedat is null
+    order by p.createdat desc
+    limit $1 offset $2
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name: limit
+    - index: 2
+      source:
+        kind: ARG
+        name: offset
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: Query
+metadata:
+  name: hot-posts
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  typeName: Query
+  fieldName: hotPosts
+  sql: |
+    select p.id,
+           p.authorid as "authorId",
+           p.title,
+           p.body,
+           p.url,
+           p.urlsummary as "urlSummary",
+           p.mediaurl as "mediaUrl",
+           p.thumbnailurl as "thumbnailUrl",
+           p.createdat as "createdAt",
+           p.editedat as "editedAt",
+           p.deletedat as "deletedAt",
+           coalesce(s.upvotes, 0) as "upvotes",
+           coalesce(s.score, 0) as "score",
+           coalesce(cc.comment_count, 0) as "commentCount",
+           p.nsfw,
+           p.spoiler,
+           p.locked,
+           p.pinned,
+           p.flairid as "flairId"
+    from posts p
+    join postscores s on s.postid = p.id
+    left join comment_counts cc on cc.postid = p.id
+    where p.deletedat is null
+    order by (coalesce(s.score, 0) / power(((extract(epoch from (now() - p.createdat)) / 3600.0) + 2), 1.5)) desc,
+             p.createdat desc
+    limit $1 offset $2
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name: limit
+    - index: 2
+      source:
+        kind: ARG
+        name: offset
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: Query
+metadata:
+  name: search-posts
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  typeName: Query
+  fieldName: searchPosts
+  sql: |
+    select p.id,
+           p.authorid as "authorId",
+           p.title,
+           p.body,
+           p.url,
+           p.urlsummary as "urlSummary",
+           p.mediaurl as "mediaUrl",
+           p.thumbnailurl as "thumbnailUrl",
+           p.createdat as "createdAt",
+           p.editedat as "editedAt",
+           p.deletedat as "deletedAt",
+           coalesce(s.upvotes, 0) as "upvotes",
+           coalesce(s.score, 0) as "score",
+           coalesce(cc.comment_count, 0) as "commentCount",
+           p.nsfw,
+           p.spoiler,
+           p.locked,
+           p.pinned,
+           p.flairid as "flairId"
+    from posts p
+    left join postscores s on s.postid = p.id
+    left join comment_counts cc on cc.postid = p.id
+    where p.deletedat is null
+      and (p.title ilike ('%' || $1 || '%') or p.body ilike ('%' || $1 || '%'))
+    order by p.createdat desc
+    limit $2 offset $3
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name: term
+    - index: 2
+      source:
+        kind: ARG
+        name: limit
+    - index: 3
+      source:
+        kind: ARG
+        name: offset
+
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: Query
+metadata:
+  name: vector-search-posts
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  typeName: Query
+  fieldName: vectorSearchPosts
+  engine: POSTGRES
+  resultMode: LIST
+  timeoutMs: 15000
+  sql: |
+    select p.id,
+           p.authorid as "authorId",
+           p.title,
+           p.body,
+           p.url,
+           p.urlsummary as "urlSummary",
+           p.mediaurl as "mediaUrl",
+           p.thumbnailurl as "thumbnailUrl",
+           p.createdat as "createdAt",
+           p.editedat as "editedAt",
+           p.deletedat as "deletedAt",
+           coalesce(s.upvotes, 0) as "upvotes",
+           coalesce(s.score, 0) as "score",
+           coalesce(cc.comment_count, 0) as "commentCount",
+           p.nsfw,
+           p.spoiler,
+           p.locked,
+           p.pinned,
+           p.flairid as "flairId",
+           (p.embedding <-> ($1::vector))::float8 as distance
+    from posts p
+    left join postscores s on s.postid = p.id
+    left join comment_counts cc on cc.postid = p.id
+    where p.deletedat is null
+      and p.embedding is not null
+    -- pgvector `<->` is a distance (smaller = closer), so sort ascending.
+    order by p.embedding <-> ($1::vector) ASC
+    limit $2
+  params:
+    - index: 1
+      source:
+        kind: PYTHON
+        name: embed384
+        python:
+          args:
+            - kind: ARG
+              name: q
+    - index: 2
+      source:
+        kind: ARG
+        name: limit
+
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: Query
+metadata:
+  name: post-comments
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  typeName: Post
+  fieldName: comments
+  sql: |
+    select id,
+           postid as "postId",
+           parentcommentid as "parentCommentId",
+           authorid as "authorId",
+           body,
+           createdat as "createdAt",
+           editedat as "editedAt",
+           deletedat as "deletedAt",
+           score
+    from comments
+    where postid = $1
+      and parentcommentid is null
+      and deletedat is null
+    order by
+      case when $2 = 'NEW' then createdat end desc,
+      case when $2 = 'OLD' then createdat end asc,
+      case when $2 = 'TOP' then score end desc,
+      case when $2 = 'BEST' then score end desc,
+      createdat asc
+  params:
+    - index: 1
+      source:
+        kind: PARENT
+        name: id
+    - index: 2
+      source:
+        kind: ARG
+        name: sort
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: Query
+metadata:
+  name: comment-replies
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  typeName: Comment
+  fieldName: replies
+  sql: |
+    select id,
+           postid as "postId",
+           parentcommentid as "parentCommentId",
+           authorid as "authorId",
+           body,
+           createdat as "createdAt",
+           editedat as "editedAt",
+           deletedat as "deletedAt",
+           score
+    from comments
+    where parentcommentid = $1
+      and deletedat is null
+    order by
+      case when $2 = 'NEW' then createdat end desc,
+      case when $2 = 'OLD' then createdat end asc,
+      case when $2 = 'TOP' then score end desc,
+      case when $2 = 'BEST' then score end desc,
+      createdat asc
+  params:
+    - index: 1
+      source:
+        kind: PARENT
+        name: id
+    - index: 2
+      source:
+        kind: ARG
+        name: sort
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: Query
+metadata:
+  name: modlog
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  typeName: Query
+  fieldName: modLog
+  sql: |
+    select id,
+           action,
+           targetpostid as "targetPostId",
+           actorid as "actorId",
+           reason,
+           createdat as "createdAt"
+    from modlog
+    order by createdat desc
+    limit $1 offset $2
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name: limit
+    - index: 2
+      source:
+        kind: ARG
+        name: offset
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: Query
+metadata:
+  name: user
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  typeName: Query
+  fieldName: user
+  resultMode: SINGLE
+  sql: |
+    select id,
+           username,
+           avatarurl as "avatarUrl",
+           createdat as "createdAt",
+           karma,
+           bio
+    from users
+    where id = $1
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name: id
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: Query
+metadata:
+  name: me
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  typeName: Query
+  fieldName: me
+  resultMode: SINGLE
+  sql: |
+    select id,
+           username,
+           avatarurl as "avatarUrl",
+           createdat as "createdAt",
+           karma,
+           bio
+    from users
+    where id = $1
+  params:
+    - index: 1
+      source:
+        kind: JWT
+        name: sub
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: Query
+metadata:
+  name: post-flair
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  typeName: Post
+  fieldName: flair
+  resultMode: SINGLE
+  sql: |
+    select id,
+           text,
+           color
+    from flairs
+    where id = $1
+  params:
+    - index: 1
+      source:
+        kind: PARENT
+        name: flairId
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PostgresMutation
+metadata:
+  name: soft-delete-post
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  mutationName: softDeletePost
+  enrich:
+    - name: traceId
+      type: String
+      fn: uuid
+    - name: requestTime
+      type: String
+      fn: utcNow
+  sql: |
+    update posts
+    set deletedat = now()
+    where id = $1
+    returning id as "postId",
+              deletedat as "deletedAt",
+              cast(null as text) as "traceId",
+              cast(null as text) as "requestTime"
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name: postId
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PostgresMutation
+metadata:
+  name: admin-soft-delete-post
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  mutationName: adminSoftDeletePost
+  sql: |
+    with updated as (
+      update posts
+      set deletedat = now()
+      where id = $1
+      returning id,
+                deletedat
+    ), logged as (
+      insert into modlog (id, action, targetpostid, actorid, reason)
+      values ($2, 'ADMIN_SOFT_DELETE_POST', $1, coalesce($3, 'anonymous'), $4)
+    )
+    select id as "postId",
+           deletedat as "deletedAt",
+           $4 as "reason",
+           $2 as "logId",
+           coalesce($3, 'anonymous') as "actorId",
+           cast(null as text) as "traceId",
+           cast(null as text) as "requestTime"
+    from updated
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name: postId
+    - index: 2
+      source:
+        kind: ARG
+        name: logId
+    - index: 3
+      source:
+        kind: JWT
+        name: sub
+    - index: 4
+      source:
+        kind: ARG
+        name: reason
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PostgresMutation
+metadata:
+  name: edit-post
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  mutationName: editPost
+  sql: |
+    update posts
+    set title = coalesce($2, title),
+        body = coalesce($3, body),
+        embedding = case when $3 is null then embedding else ($9::vector) end,
+        url = coalesce($4, url),
+        urlsummary = coalesce($10, urlsummary),
+        mediaurl = coalesce($5, mediaurl),
+        flairid = coalesce($6, flairid),
+        nsfw = coalesce($7, nsfw),
+        spoiler = coalesce($8, spoiler),
+        editedat = now()
+    where id = $1
+    returning id,
+              title,
+              body,
+              url,
+              urlsummary as "urlSummary",
+              mediaurl as "mediaUrl",
+              flairid as "flairId",
+              nsfw,
+              spoiler,
+              editedat as "editedAt"
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name:  id
+    - index: 2
+      source:
+        kind: ARG
+        name:  title
+    - index: 3
+      source:
+        kind: ARG
+        name:  body
+    - index: 4
+      source:
+        kind: ARG
+        name:  url
+    - index: 5
+      source:
+        kind: ARG
+        name:  mediaUrl
+    - index: 6
+      source:
+        kind: ARG
+        name:  flairId
+    - index: 7
+      source:
+        kind: ARG
+        name:  nsfw
+    - index: 8
+      source:
+        kind: ARG
+        name:  spoiler
+    - index: 9
+      source:
+        kind: PYTHON
+        name: embed384
+        python:
+          args:
+            - kind: ARG
+              name: body
+    - index: 10
+      source:
+        kind: PYTHON
+        name: summarize
+        python:
+          args:
+            - kind: ARG
+              name: url
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PostgresMutation
+metadata:
+  name: create-post
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  mutationName: createPost
+  sql: |
+    insert into posts (id, authorid, title, body, embedding, url, urlsummary, mediaurl, flairid, createdat, nsfw, spoiler)
+    values (gen_random_uuid()::text, coalesce($1, 'anonymous'), $2, $3, ($9::vector), $4, $10, $5, $6, now(), coalesce($7, false), coalesce($8, false))
+    returning id,
+              authorid as "authorId",
+              title,
+              body,
+              url,
+              urlsummary as "urlSummary",
+              mediaurl as "mediaUrl",
+              flairid as "flairId",
+              nsfw,
+              spoiler,
+              cast(null as text) as "traceId",
+              cast(null as text) as "requestTime"
+  params:
+    - index: 1
+      source:
+        kind: JWT
+        name: sub
+    - index: 2
+      source:
+        kind: ARG
+        name:  title
+    - index: 3
+      source:
+        kind: ARG
+        name:  body
+    - index: 4
+      source:
+        kind: ARG
+        name:  url
+    - index: 5
+      source:
+        kind: ARG
+        name:  mediaUrl
+    - index: 6
+      source:
+        kind: ARG
+        name:  flairId
+    - index: 7
+      source:
+        kind: ARG
+        name:  nsfw
+    - index: 8
+      source:
+        kind: ARG
+        name:  spoiler
+    - index: 9
+      source:
+        kind: PYTHON
+        name: embed384
+        python:
+          args:
+            - kind: ARG
+              name: body
+    - index: 10
+      source:
+        kind: PYTHON
+        name: summarize
+        python:
+          args:
+            - kind: ARG
+              name: url
+
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PostgresMutation
+metadata:
+  name: create-comment
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  mutationName: createComment
+  sql: |
+    insert into comments (id, postid, parentcommentid, authorid, body, createdat)
+    values (gen_random_uuid()::text, $1, $2, coalesce($3, 'anonymous'), $4, now())
+    returning id,
+              postid as "postId",
+              parentcommentid as "parentCommentId",
+              authorid as "authorId",
+              body,
+              cast(null as text) as "traceId",
+              cast(null as text) as "requestTime"
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name:  postId
+    - index: 2
+      source:
+        kind: ARG
+        name:  parentCommentId
+    - index: 3
+      source:
+        kind: JWT
+        name: sub
+    - index: 4
+      source:
+        kind: ARG
+        name:  body
+
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PostgresMutation
+metadata:
+  name: vote-post
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  mutationName: votePost
+  sql: |
+    with upsert as (
+      insert into post_votes (postid, userid, delta)
+      values ($1, coalesce($2, 'anonymous'), $3)
+      on conflict (postid, userid) do update set delta = excluded.delta
+    ), agg as (
+      select postid,
+             sum(delta) as score,
+             count(*) filter (where delta > 0) as upvotes
+      from post_votes
+      where postid = $1
+      group by postid
+    ), upd as (
+      insert into postscores (postid, upvotes, score, lastupdated)
+      select postid, upvotes, score, now() from agg
+      on conflict (postid) do update set upvotes = excluded.upvotes, score = excluded.score, lastupdated = excluded.lastupdated
+    )
+    select $1 as "postId",
+           coalesce($2, 'anonymous') as "voterId",
+           $3 as "delta",
+           cast(null as text) as "traceId",
+           cast(null as text) as "requestTime"
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name:  postId
+    - index: 2
+      source:
+        kind: JWT
+        name: sub
+    - index: 3
+      source:
+        kind: ARG
+        name:  delta
+
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PostgresMutation
+metadata:
+  name: upvote-post
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  mutationName: upvotePost
+  sql: |
+    with upsert as (
+      insert into post_votes (postid, userid, delta)
+      values ($1, coalesce($2, 'anonymous'), $3)
+      on conflict (postid, userid) do update set delta = excluded.delta
+    ), agg as (
+      select postid,
+             sum(delta) as score,
+             count(*) filter (where delta > 0) as upvotes
+      from post_votes
+      where postid = $1
+      group by postid
+    ), upd as (
+      insert into postscores (postid, upvotes, score, lastupdated)
+      select postid, upvotes, score, now() from agg
+      on conflict (postid) do update set upvotes = excluded.upvotes, score = excluded.score, lastupdated = excluded.lastupdated
+    )
+    select $1 as "postId",
+           coalesce($2, 'anonymous') as "voterId",
+           $3 as "delta",
+           cast(null as text) as "traceId",
+           cast(null as text) as "requestTime"
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name:  postId
+    - index: 2
+      source:
+        kind: JWT
+        name: sub
+    - index: 3
+      source:
+        kind: ARG
+        name:  delta
+
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PostgresMutation
+metadata:
+  name: delete-post
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  mutationName: deletePost
+  sql: |
+    update posts
+    set deletedat = now()
+    where id = $1
+    returning id,
+              deletedat as "deletedAt"
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name:  id
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PostgresMutation
+metadata:
+  name: lock-post
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  mutationName: lockPost
+  sql: |
+    update posts
+    set locked = true
+    where id = $1
+    returning id,
+              locked
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name: id
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PostgresMutation
+metadata:
+  name: pin-post
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  mutationName: pinPost
+  sql: |
+    update posts
+    set pinned = true
+    where id = $1
+    returning id,
+              pinned
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name: id
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PostgresMutation
+metadata:
+  name: edit-comment
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  mutationName: editComment
+  sql: |
+    update comments
+    set body = $2,
+        editedat = now()
+    where id = $1
+    returning id,
+              body,
+              editedat as "editedAt"
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name:  id
+    - index: 2
+      source:
+        kind: ARG
+        name:  body
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PostgresMutation
+metadata:
+  name: delete-comment
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  mutationName: deleteComment
+  sql: |
+    update comments
+    set deletedat = now()
+    where id = $1
+    returning id,
+              deletedat as "deletedAt"
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name:  id
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PostgresMutation
+metadata:
+  name: vote-comment
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  mutationName: voteComment
+  sql: |
+    with upsert as (
+      insert into comment_votes (commentid, userid, delta)
+      values ($2, coalesce($3, 'anonymous'), $1)
+      on conflict (commentid, userid) do update set delta = excluded.delta
+    ), agg as (
+      select commentid,
+             sum(delta) as score
+      from comment_votes
+      where commentid = $2
+      group by commentid
+    ), upd as (
+      update comments
+      set score = coalesce((select score from agg), 0)
+      where id = $2
+    )
+    select $2 as "commentId",
+           coalesce($3, 'anonymous') as "voterId",
+           $1 as "delta"
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name:  delta
+    - index: 2
+      source:
+        kind: ARG
+        name:  commentId
+    - index: 3
+      source:
+        kind: JWT
+        name: sub
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PostgresMutation
+metadata:
+  name: report
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  mutationName: report
+  sql: |
+    insert into reports (id, targetid, targettype, reason, reporterid)
+    values (md5(random()::text || clock_timestamp()::text), $1, $2, $3, coalesce($4, 'anonymous'))
+    returning id,
+              targetid as "targetId",
+              targettype as "targetType",
+              reason,
+              createdat as "createdAt",
+              reporterid as "reporterId"
+  params:
+    - index: 1
+      source:
+        kind: ARG
+        name:  targetId
+    - index: 2
+      source:
+        kind: ARG
+        name:  targetType
+    - index: 3
+      source:
+        kind: ARG
+        name:  reason
+    - index: 4
+      source:
+        kind: JWT
+        name: sub
+---
+apiVersion: vertx.henneberger.dev/v1alpha1
+kind: PostgresSubscription
+metadata:
+  name: comment-updates
+spec:
+  schemaRefs: ["forum"]
+  connectionRef: forum-db
+  table: comments
+  fieldName: commentUpdates
+  operations: [INSERT, UPDATE]
+  filters:
+    - field: id
+      source:
+        kind: ARG
+        name: id

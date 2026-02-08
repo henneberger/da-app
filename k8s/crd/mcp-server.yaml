@@ -1,0 +1,50 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: mcpservers.vertx.henneberger.dev
+spec:
+  group: vertx.henneberger.dev
+  names:
+    kind: McpServer
+    plural: mcpservers
+    singular: mcpserver
+    shortNames:
+      - vxmcp
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [schemaRefs]
+              properties:
+                schemaRefs:
+                  type: array
+                  items: { type: string }
+                path:
+                  type: string
+                  description: "HTTP path to expose the MCP server on (default: /mcp)."
+                requireAuth:
+                  type: boolean
+                  description: "If true (default), enforce auth when the GraphQL runtime has auth enabled."
+                operationRefs:
+                  type: array
+                  description: "Optional allow-list of GraphQLOperation names to expose as MCP tools."
+                  items: { type: string }
+                toolNameStrategy:
+                  type: string
+                  description: "How to name tools derived from GraphQLOperations."
+                  enum: ["RESOURCE_NAME", "OPERATION_NAME"]
+            status:
+              type: object
+              properties:
+                status:
+                  type: string
+

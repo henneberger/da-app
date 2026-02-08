@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vertx-operator
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flink-job
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vertx-operator
+rules:
+  - apiGroups: ["vertx.henneberger.dev"]
+    resources:
+      - connections
+      - duckdbconnections
+      - mongoconnections
+      - elasticsearchconnections
+      - jdbcconnections
+      - dynamodbconnections
+      - queries
+      - postgresmutations
+      - postgressubscriptions
+      - pythonfunctions
+      - kafkaconnections
+      - kafkaevents
+      - kafkasubscriptions
+      - graphqlschemas
+      - graphqloperations
+      - restgraphqlendpoints
+      - mcpservers
+      - ingestionendpoints
+      - jsonschemas
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["vertx.henneberger.dev"]
+    resources:
+      - graphqlschemas/status
+      - queries/status
+      - postgresmutations/status
+      - graphqloperations/status
+      - restgraphqlendpoints/status
+      - mcpservers/status
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["dev.henneberger"]
+    resources: ["flinksqljobs", "flinksqljobs/status", "flinksqljobs/finalizers", "flinkpythonfunctions", "flinkcatalogs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps", "services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["flink.apache.org"]
+    resources: ["flinkdeployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vertx-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vertx-operator
+subjects:
+  - kind: ServiceAccount
+    name: vertx-operator
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flink-job
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - services
+      - endpoints
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - replicasets
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flink-job
+subjects:
+  - kind: ServiceAccount
+    name: flink-job
+    namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: flink-job
