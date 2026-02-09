@@ -165,7 +165,9 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: pgvector/pgvector:pg16
+          # Needs both pgvector (for embeddings) and wal2json (for logical decoding used by subscriptions).
+          # Build locally with: `make build-forum-postgres-image` (defaults to forum-postgres:pg16-wal2json).
+          image: forum-postgres:pg16-wal2json
           imagePullPolicy: IfNotPresent
           args:
             - "-c"

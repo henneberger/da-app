@@ -1,11 +1,13 @@
 .PHONY: \
 	build-runtime-image \
 	build-mcp-gateway-image \
+	build-forum-postgres-image \
 	install-operator \
 	init-cluster \
 	destroy-init-cluster
 
 RUNTIME_IMAGE ?= vertx-graphql:latest
+FORUM_POSTGRES_IMAGE ?= forum-postgres:pg16-wal2json
 
 # Cluster bootstrap (used by local/dev setups).
 NAMESPACE ?= default
@@ -22,6 +24,9 @@ build-runtime-image:
 
 build-mcp-gateway-image:
 	docker build -t $(MCP_GATEWAY_IMAGE) -f mcp/gateway/Dockerfile mcp/gateway
+
+build-forum-postgres-image:
+	docker build -t $(FORUM_POSTGRES_IMAGE) -f samples/postgres/Dockerfile.pgvector-wal2json samples/postgres
 
 install-operator:
 	kubectl apply -f k8s/crd

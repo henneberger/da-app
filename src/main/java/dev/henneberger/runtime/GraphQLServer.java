@@ -351,7 +351,12 @@ public final class GraphQLServer {
                 event.fail(result.getMessage());
                 return;
               }
-              wsAuthContexts.put(event.message().socket(), result.getContext());
+              // ConcurrentHashMap does not permit null values; unauthenticated connections are allowed
+              // when auth is not required, but they won't have an AuthContext.
+              AuthContext authContext = result.getContext();
+              if (authContext != null && event.message() != null && event.message().socket() != null) {
+                wsAuthContexts.put(event.message().socket(), authContext);
+              }
             }
             event.complete();
           })
@@ -3508,10 +3513,19 @@ public final class GraphQLServer {
     }
 
     private AuthResult authenticateToken(String token) {
+      // WebSocket subscriptions may not provide auth at connection init.
+      // If auth is not required, missing tokens should pass (same behavior as HTTP).
+      if (token == null || token.isBlank()) {
+        LOGGER.info("Auth missing token (required={})", required);
+        if (required) {
+          return AuthResult.deny("Unauthorized", true);
+        }
+        return AuthResult.allow(null);
+      }
       if (token != null && token.regionMatches(true, 0, "Basic ", 0, 6)) {
         return authenticateBasic(token);
       }
-      LOGGER.info("Auth token received len={} prefix={}", token.length(), tokenPrefix(token));
+      LOGGER.info("Auth token received prefix={}", tokenPrefix(token));
       if (jwtVerifier == null) {
         LOGGER.info("Auth verifier not configured; allowing request");
         return AuthResult.allow(null);
@@ -6051,6 +6065,12 @@ public final class GraphQLServer {
         if (message != null && message.contains("already exists")) {
           LOGGER.info("Postgres replication slot {} already exists", slotName);
           return;
+        }
+        if (message != null && message.contains("could not access file \"wal2json\"")) {
+          LOGGER.error(
+            "Postgres server is missing the 'wal2json' logical decoding output plugin. " +
+              "Install wal2json on the Postgres server (shared library) or use a Postgres image that includes it. " +
+              "Current image must support both wal_level=logical and wal2json.");
         }
         LOGGER.error("Failed creating Postgres replication slot {}: {}", slotName, message);
         if (message == null || !message.contains("already exists")) {
