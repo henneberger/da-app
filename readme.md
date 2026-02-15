@@ -5,6 +5,8 @@ My sub-goals:
 - Get the AI model to be able to implement entire features with little-to-no intervention
 - Able to deploy an entire data pipeline through k8s crd introspection
 
+However, this is a fundamentally misguided approach. AI can generate the scaffolding with some work. If anything, the postgres logical replication should be made into a reusable vertx-style library.
+
 ## Features
 - Full-featured GraphQL server (Queries, Mutations, Subscriptions)
 - Multi-database support (Postgres, DuckDB, MySQL, Elasticsearch, Kafka, Mongo, DynamoDB, Oracle)
